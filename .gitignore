@@ -1,9 +1,15 @@
 # Secrets
 .env
 
-# Database (too large for git, contains user data)
+# Database (contains user data)
 data/feedback.db
+
+# Private experiments
+_private/
 
 # Python
 __pycache__/
 *.pyc
+*.pyo
+.venv/
+venv/
