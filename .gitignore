@@ -1,0 +1,9 @@
+# Secrets
+.env
+
+# Database (too large for git, contains user data)
+data/feedback.db
+
+# Python
+__pycache__/
+*.pyc
