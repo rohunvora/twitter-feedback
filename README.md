@@ -1,16 +1,16 @@
 # Twitter Feedback Analyzer
 
-Fetch replies and quotes to any tweet, then generate an AI-powered insights report.
+Fetch replies and quotes to any tweet, then view them in a real-time dashboard.
 
 ```bash
 # 1. Fetch replies & quotes
 python fetch.py https://x.com/username/status/123456789
 
-# 2. Generate insights report
-python insights.py https://x.com/username/status/123456789
+# 2. Launch real-time dashboard
+python dashboard.py
 ```
 
-Opens an HTML report with categorized feedback, actionable items, and noise filtered out.
+Opens a live dashboard at `localhost:8765` with auto-refresh every 30 seconds.
 
 ---
 
@@ -82,6 +82,7 @@ python analyze.py https://x.com/user/status/123456789
 twitter-feedback/
 ├── fetch.py        # X API fetcher with incremental watermarks
 ├── analyze.py      # Basic rule-based categorization
+├── dashboard.py    # Real-time web dashboard (localhost:8765)
 ├── insights.py     # AI-powered HTML report generator
 ├── data/
 │   └── feedback.db # SQLite database (auto-created)
