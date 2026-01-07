@@ -52,21 +52,42 @@ def format_relative_time(iso_timestamp):
         return ""
 
 
+# Colors for parent tweet indicators
+PARENT_COLORS = ['#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899']
+
 def get_tracked_tweets():
-    """Get list of parent tweet IDs being tracked."""
+    """Get list of parent tweet IDs being tracked with metadata."""
     if not DB_PATH.exists():
         return []
     conn = sqlite3.connect(DB_PATH)
-    result = conn.execute("SELECT DISTINCT parent_tweet_id FROM tweets").fetchall()
+    result = conn.execute("""
+        SELECT parent_tweet_id, COUNT(*) as count,
+               MIN(created_at) as first_reply
+        FROM tweets
+        GROUP BY parent_tweet_id
+        ORDER BY MIN(CAST(id AS INTEGER)) DESC
+    """).fetchall()
     conn.close()
-    return [r[0] for r in result]
+
+    tweets = []
+    for i, r in enumerate(result):
+        tweets.append({
+            'id': r[0],
+            'count': r[1],
+            'color': PARENT_COLORS[i % len(PARENT_COLORS)],
+            'label': f"Tweet {i+1}"
+        })
+    return tweets
 
 
 def get_dashboard_data():
     """Get all data for the dashboard."""
-    tweet_ids = get_tracked_tweets()
-    if not tweet_ids:
-        return {"items": [], "total": 0, "tracked_tweets": [], "last_updated": datetime.now().isoformat()}
+    tracked_tweets = get_tracked_tweets()
+    if not tracked_tweets:
+        return {"items": [], "total": 0, "tracked_tweets": [], "parent_map": {}, "last_updated": datetime.now().isoformat()}
+
+    tweet_ids = [t['id'] for t in tracked_tweets]
+    parent_map = {t['id']: t for t in tracked_tweets}
 
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
@@ -91,52 +112,90 @@ def get_dashboard_data():
     return {
         "items": [dict(r) for r in all_items],
         "total": total,
-        "tracked_tweets": tweet_ids,
+        "tracked_tweets": tracked_tweets,
+        "parent_map": parent_map,
         "last_updated": datetime.now().isoformat()
     }
+
+
+def highlight_keywords(text):
+    """Highlight actionable keywords in text."""
+    keywords = {
+        'bug': '#ef4444',
+        'broken': '#ef4444',
+        'error': '#ef4444',
+        'issue': '#ef4444',
+        'fix': '#ef4444',
+        'feature': '#8b5cf6',
+        'please': '#3b82f6',
+        'help': '#3b82f6',
+        'how': '#3b82f6',
+        'why': '#f59e0b',
+        'love': '#10b981',
+        'great': '#10b981',
+        'amazing': '#10b981',
+        'thanks': '#10b981',
+    }
+    for word, color in keywords.items():
+        # Case-insensitive replacement with highlighting
+        pattern = re.compile(rf'\b({word})\b', re.IGNORECASE)
+        text = pattern.sub(rf'<mark style="background:{color}20;color:{color};padding:1px 3px;border-radius:3px">\1</mark>', text)
+    return text
 
 
 def render_dashboard():
     """Render the HTML dashboard."""
     data = get_dashboard_data()
+    parent_map = data.get('parent_map', {})
 
     # Build items HTML with data attributes for sorting
     items_html = ""
     for item in data["items"]:
         text_raw = item["text"].replace("<", "&lt;").replace(">", "&gt;")
         text_preview = text_raw[:140] + "..." if len(text_raw) > 140 else text_raw
+        text_highlighted = highlight_keywords(text_preview)
+        text_full_highlighted = highlight_keywords(text_raw)
         text_escaped = text_raw.replace("'", "\\'").replace('"', '\\"').replace('\n', ' ')
+        is_truncated = len(text_raw) > 140
         metrics = json.loads(item["metrics"]) if item["metrics"] else {}
         likes = metrics.get("like_count", 0)
         tweet_url = f"https://x.com/{item['author_username']}/status/{item['id']}"
         priority = item.get("priority", 0)
-        # Use tweet ID as timestamp proxy (Twitter IDs are time-ordered)
         timestamp = item['id']
         relative_time = format_relative_time(item.get('created_at', ''))
 
+        # Parent tweet indicator
+        parent_info = parent_map.get(item['parent_tweet_id'], {})
+        parent_color = parent_info.get('color', '#94a3b8')
+        parent_label = parent_info.get('label', '')
+
         items_html += f'''
         <div class="item" data-id="{item['id']}" data-username="{item['author_username']}"
-             data-text="{text_escaped}" data-priority="{priority}" data-timestamp="{timestamp}" data-likes="{likes}">
+             data-text="{text_escaped}" data-priority="{priority}" data-timestamp="{timestamp}"
+             data-likes="{likes}" data-parent="{item['parent_tweet_id']}" tabindex="0">
+            <div class="parent-indicator" style="background:{parent_color}" title="{parent_label}"></div>
+            <img class="avatar" src="https://unavatar.io/twitter/{item['author_username']}" alt="" loading="lazy" onerror="this.src='https://abs.twimg.com/sticky/default_profile_images/default_profile_normal.png'">
             <div class="item-content">
                 <div class="item-header">
                     <a href="{tweet_url}" target="_blank" class="username">@{item["author_username"]}</a>
                     {f'<span class="likes">♥ {likes}</span>' if likes > 0 else ''}
                     {f'<span class="timestamp">{relative_time}</span>' if relative_time else ''}
                 </div>
-                <div class="item-text">{text_preview}</div>
+                <div class="item-text" onclick="toggleExpand(this)">{text_highlighted}</div>
+                {f'<div class="item-text-full">{text_full_highlighted}</div>' if is_truncated else ''}
                 <div class="item-note" id="note-{item['id']}"></div>
             </div>
             <div class="item-actions">
-                <button class="action-btn star" onclick="starItem('{item['id']}')" title="Star">
+                <button class="action-btn star" onclick="starItem('{item['id']}')" title="Star (s)">
                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"></polygon></svg>
                 </button>
-                <button class="action-btn archive" onclick="archiveItem('{item['id']}')" title="Archive">
+                <button class="action-btn archive" onclick="archiveItem('{item['id']}')" title="Archive (a)">
                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="21 8 21 21 3 21 3 8"></polyline><rect x="1" y="3" width="22" height="5"></rect><line x1="10" y1="12" x2="14" y2="12"></line></svg>
                 </button>
-                <button class="action-btn spam" onclick="spamItem('{item['id']}')" title="Spam/Irrelevant">
+                <button class="action-btn spam" onclick="spamItem('{item['id']}')" title="Spam (x)">
                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>
                 </button>
-                <button class="action-btn note" onclick="toggleNote('{item['id']}')" title="Add note">
+                <button class="action-btn note" onclick="toggleNote('{item['id']}')" title="Note (n)">
                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path></svg>
                 </button>
             </div>
@@ -428,15 +487,59 @@ def render_dashboard():
             display: block;
         }}
 
-        /* Actions */
+        /* Parent indicator */
+        .parent-indicator {{
+            width: 4px;
+            flex-shrink: 0;
+            border-radius: 2px;
+            align-self: stretch;
+        }}
+
+        .avatar {{
+            width: 40px;
+            height: 40px;
+            border-radius: 50%;
+            flex-shrink: 0;
+            margin-right: 12px;
+            background: #e2e8f0;
+            object-fit: cover;
+        }}
+
+        /* Full text expand */
+        .item-text {{
+            cursor: pointer;
+        }}
+
+        .item-text-full {{
+            display: none;
+            color: #475569;
+            font-size: 14px;
+            line-height: 1.5;
+            margin-top: 8px;
+            padding: 12px;
+            background: #f8fafc;
+            border-radius: 6px;
+        }}
+
+        .item.expanded .item-text {{
+            display: none;
+        }}
+
+        .item.expanded .item-text-full {{
+            display: block;
+        }}
+
+        /* Actions - always visible */
         .item-actions {{
             display: flex;
             gap: 4px;
-            opacity: 0;
+            opacity: 0.4;
             transition: opacity 0.15s;
         }}
 
-        .item:hover .item-actions {{
+        .item:hover .item-actions,
+        .item:focus .item-actions,
+        .item.selected .item-actions {{
             opacity: 1;
         }}
 
@@ -611,6 +714,116 @@ def render_dashboard():
             text-transform: uppercase;
         }}
 
+        /* Search bar */
+        .search-bar {{
+            display: flex;
+            gap: 8px;
+            margin-bottom: 16px;
+        }}
+
+        .search-input {{
+            flex: 1;
+            padding: 10px 14px;
+            border: 1px solid #e2e8f0;
+            border-radius: 6px;
+            font-size: 14px;
+            outline: none;
+            background: #fff;
+        }}
+
+        .search-input:focus {{
+            border-color: #3b82f6;
+            box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
+        }}
+
+        .search-input::placeholder {{
+            color: #94a3b8;
+        }}
+
+        /* Selected item for keyboard nav */
+        .item.selected {{
+            background: #eff6ff;
+            box-shadow: inset 0 0 0 2px #3b82f6;
+        }}
+
+        /* Keyboard hint */
+        .keyboard-hint {{
+            display: flex;
+            gap: 16px;
+            padding: 8px 16px;
+            background: #f8fafc;
+            border-radius: 6px;
+            font-size: 12px;
+            color: #64748b;
+            margin-bottom: 16px;
+        }}
+
+        .keyboard-hint kbd {{
+            background: #fff;
+            border: 1px solid #e2e8f0;
+            border-radius: 4px;
+            padding: 2px 6px;
+            font-family: monospace;
+            font-size: 11px;
+            margin-right: 4px;
+        }}
+
+        /* Undo toast */
+        .toast.with-undo {{
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }}
+
+        .toast .undo-btn {{
+            background: #fff;
+            color: #1e293b;
+            border: none;
+            padding: 4px 12px;
+            border-radius: 4px;
+            font-size: 13px;
+            cursor: pointer;
+            font-weight: 500;
+        }}
+
+        .toast .undo-btn:hover {{
+            background: #f1f5f9;
+        }}
+
+        /* Parent legend */
+        .parent-legend {{
+            display: flex;
+            gap: 12px;
+            padding: 8px 16px;
+            background: #fff;
+            border-radius: 6px;
+            border: 1px solid #e2e8f0;
+            margin-bottom: 16px;
+            font-size: 13px;
+        }}
+
+        .parent-legend-item {{
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }}
+
+        .parent-legend-dot {{
+            width: 8px;
+            height: 8px;
+            border-radius: 2px;
+        }}
+
+        .parent-legend-link {{
+            color: #64748b;
+            text-decoration: none;
+        }}
+
+        .parent-legend-link:hover {{
+            color: #1e293b;
+            text-decoration: underline;
+        }}
+
         /* Add tweet bar */
         .add-tweet-bar {{
             display: flex;
@@ -723,6 +936,25 @@ def render_dashboard():
             </button>
         </div>
 
+        <div class="parent-legend">
+            <span style="color:#94a3b8">Tracking:</span>
+            {''.join(f'<div class="parent-legend-item"><div class="parent-legend-dot" style="background:{t["color"]}"></div><a href="https://x.com/i/status/{t["id"]}" target="_blank" class="parent-legend-link">{t["label"]} ({t["count"]})</a></div>' for t in data.get('tracked_tweets', []))}
+        </div>
+
+        <div class="search-bar">
+            <input type="text" class="search-input" id="search-input" placeholder="Search feedback... (try: bug, feature, help)" oninput="filterBySearch(this.value)" />
+        </div>
+
+        <div class="keyboard-hint">
+            <span><kbd>j</kbd><kbd>k</kbd> navigate</span>
+            <span><kbd>s</kbd> star</span>
+            <span><kbd>a</kbd> archive</span>
+            <span><kbd>x</kbd> spam</span>
+            <span><kbd>n</kbd> note</span>
+            <span><kbd>o</kbd> open tweet</span>
+            <span><kbd>e</kbd> expand</span>
+        </div>
+
         <div class="stats-bar">
             <div class="stat">
                 <span class="stat-value" id="inbox-count">{data['total']}</span>
@@ -741,9 +973,9 @@ def render_dashboard():
                 <span class="stat-label">Spam</span>
             </div>
             <div style="flex:1"></div>
-            <button class="copy-btn" onclick="copyVisible()">
+            <button class="copy-btn" onclick="copyStarred()">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
-                Copy All
+                Copy Starred
             </button>
         </div>
 
@@ -782,6 +1014,9 @@ def render_dashboard():
 
         let currentSort = 'time';
         let currentStatus = 'inbox';
+        let currentSearch = '';
+        let selectedIndex = -1;
+        let lastAction = null; // For undo
 
         function init() {{
             // Apply saved state
@@ -840,6 +1075,8 @@ def render_dashboard():
 
         function archiveItem(id) {{
             const item = document.querySelector(`.item[data-id="${{id}}"]`);
+            lastAction = {{ type: 'archive', id, wasStarred: !!starredItems[id] }};
+
             archivedItems[id] = true;
             delete starredItems[id];
             delete spamItems[id];
@@ -851,11 +1088,14 @@ def render_dashboard():
             localStorage.setItem('spamTweets', JSON.stringify(spamItems));
             updateCounts();
             applyFilters();
-            showToast('Archived');
+            showToastWithUndo('Archived');
+            moveToNextVisible();
         }}
 
         function spamItem(id) {{
             const item = document.querySelector(`.item[data-id="${{id}}"]`);
+            lastAction = {{ type: 'spam', id, wasStarred: !!starredItems[id] }};
+
             spamItems[id] = true;
             delete starredItems[id];
             delete archivedItems[id];
@@ -867,7 +1107,8 @@ def render_dashboard():
             localStorage.setItem('archivedTweets', JSON.stringify(archivedItems));
             updateCounts();
             applyFilters();
-            showToast('Marked as spam');
+            showToastWithUndo('Marked as spam');
+            moveToNextVisible();
         }}
 
         function restoreItem(id) {{
@@ -968,6 +1209,8 @@ def render_dashboard():
                 const isArchived = !!archivedItems[id];
                 const isSpam = !!spamItems[id];
                 const hasNote = item.dataset.hasNote === 'true';
+                const text = (item.dataset.text || '').toLowerCase();
+                const username = (item.dataset.username || '').toLowerCase();
 
                 let show = false;
 
@@ -984,12 +1227,21 @@ def render_dashboard():
                     show = hasNote;
                 }}
 
+                // Search filter (AND with status filter)
+                if (show && currentSearch) {{
+                    show = text.includes(currentSearch) || username.includes(currentSearch);
+                }}
+
                 item.classList.toggle('hidden', !show);
                 if (show) visibleCount++;
             }});
 
             document.getElementById('visible-count').textContent = visibleCount + ' showing';
             document.getElementById('empty-state').style.display = visibleCount === 0 ? 'block' : 'none';
+
+            // Reset selection when filters change
+            selectedIndex = -1;
+            document.querySelectorAll('.item.selected').forEach(el => el.classList.remove('selected'));
         }}
 
         function updateCounts() {{
@@ -1005,30 +1257,164 @@ def render_dashboard():
             document.getElementById('spam-count').textContent = spamCount;
         }}
 
-        function copyVisible() {{
-            const items = [...document.querySelectorAll('.item:not(.hidden)')];
-            const texts = items.map(item => {{
-                const id = item.dataset.id;
-                const note = tweetNotes[id] ? ` [Note: ${{tweetNotes[id]}}]` : '';
-                const starred = starredItems[id] ? '⭐ ' : '';
-                return `${{starred}}@${{item.dataset.username}}: ${{item.dataset.text}}${{note}}`;
-            }});
-
-            if (texts.length === 0) {{
-                showToast('No items to copy');
+        function copyStarred() {{
+            const starredIds = Object.keys(starredItems);
+            if (starredIds.length === 0) {{
+                showToast('No starred items to copy');
                 return;
             }}
 
-            navigator.clipboard.writeText(`Feedback (${{texts.length}} items):\\n\\n` + texts.join('\\n\\n'));
-            showToast(`Copied ${{texts.length}} items`);
+            const texts = starredIds.map(id => {{
+                const data = starredItems[id];
+                const note = data.note ? ` [Note: ${{data.note}}]` : '';
+                return `@${{data.username}}: ${{data.text}}${{note}}`;
+            }});
+
+            navigator.clipboard.writeText(`Starred Feedback (${{texts.length}} items):\\n\\n` + texts.join('\\n\\n'));
+            showToast(`Copied ${{texts.length}} starred items`);
         }}
 
         function showToast(message) {{
             const toast = document.getElementById('toast');
+            toast.className = 'toast';
             toast.textContent = message;
             toast.classList.add('visible');
             setTimeout(() => toast.classList.remove('visible'), 2000);
         }}
+
+        function showToastWithUndo(message) {{
+            const toast = document.getElementById('toast');
+            toast.className = 'toast with-undo';
+            toast.innerHTML = `<span>${{message}}</span><button class="undo-btn" onclick="undoLastAction()">Undo</button>`;
+            toast.classList.add('visible');
+            setTimeout(() => {{
+                toast.classList.remove('visible');
+                lastAction = null;
+            }}, 4000);
+        }}
+
+        function undoLastAction() {{
+            if (!lastAction) return;
+            const {{ type, id, wasStarred }} = lastAction;
+            const item = document.querySelector(`.item[data-id="${{id}}"]`);
+
+            if (type === 'archive') {{
+                delete archivedItems[id];
+                item.classList.remove('archived');
+            }} else if (type === 'spam') {{
+                delete spamItems[id];
+                item.classList.remove('spammed');
+            }}
+
+            if (wasStarred) {{
+                item.classList.add('starred');
+            }}
+
+            localStorage.setItem('archivedTweets', JSON.stringify(archivedItems));
+            localStorage.setItem('spamTweets', JSON.stringify(spamItems));
+            updateCounts();
+            applyFilters();
+            showToast('Undone');
+            lastAction = null;
+        }}
+
+        // Search filtering
+        function filterBySearch(query) {{
+            currentSearch = query.toLowerCase();
+            applyFilters();
+        }}
+
+        // Expand/collapse full text
+        function toggleExpand(el) {{
+            const item = el.closest('.item');
+            item.classList.toggle('expanded');
+        }}
+
+        // Keyboard navigation
+        function getVisibleItems() {{
+            return [...document.querySelectorAll('.item:not(.hidden)')];
+        }}
+
+        function selectItem(index) {{
+            const items = getVisibleItems();
+            if (items.length === 0) return;
+
+            // Deselect previous
+            document.querySelectorAll('.item.selected').forEach(el => el.classList.remove('selected'));
+
+            // Clamp index
+            selectedIndex = Math.max(0, Math.min(index, items.length - 1));
+            const item = items[selectedIndex];
+            item.classList.add('selected');
+            item.scrollIntoView({{ behavior: 'smooth', block: 'nearest' }});
+        }}
+
+        function moveToNextVisible() {{
+            const items = getVisibleItems();
+            if (selectedIndex >= 0 && selectedIndex < items.length - 1) {{
+                selectItem(selectedIndex);
+            }}
+        }}
+
+        function getSelectedId() {{
+            const items = getVisibleItems();
+            if (selectedIndex >= 0 && selectedIndex < items.length) {{
+                return items[selectedIndex].dataset.id;
+            }}
+            return null;
+        }}
+
+        // Keyboard shortcuts
+        document.addEventListener('keydown', (e) => {{
+            // Ignore if typing in input
+            if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+
+            const key = e.key.toLowerCase();
+
+            if (key === 'j') {{
+                e.preventDefault();
+                selectItem(selectedIndex + 1);
+            }} else if (key === 'k') {{
+                e.preventDefault();
+                selectItem(selectedIndex - 1);
+            }} else if (key === 's') {{
+                e.preventDefault();
+                const id = getSelectedId();
+                if (id) starItem(id);
+            }} else if (key === 'a') {{
+                e.preventDefault();
+                const id = getSelectedId();
+                if (id) archiveItem(id);
+            }} else if (key === 'x') {{
+                e.preventDefault();
+                const id = getSelectedId();
+                if (id) spamItem(id);
+            }} else if (key === 'n') {{
+                e.preventDefault();
+                const id = getSelectedId();
+                if (id) toggleNote(id);
+            }} else if (key === 'o') {{
+                e.preventDefault();
+                const items = getVisibleItems();
+                if (selectedIndex >= 0 && selectedIndex < items.length) {{
+                    const link = items[selectedIndex].querySelector('.username');
+                    if (link) window.open(link.href, '_blank');
+                }}
+            }} else if (key === 'e') {{
+                e.preventDefault();
+                const items = getVisibleItems();
+                if (selectedIndex >= 0 && selectedIndex < items.length) {{
+                    const textEl = items[selectedIndex].querySelector('.item-text');
+                    if (textEl) toggleExpand(textEl);
+                }}
+            }} else if (key === 'z' && (e.metaKey || e.ctrlKey)) {{
+                e.preventDefault();
+                undoLastAction();
+            }} else if (key === '/' || key === 'f' && (e.metaKey || e.ctrlKey)) {{
+                e.preventDefault();
+                document.getElementById('search-input').focus();
+            }}
+        }});
 
         async function addTweet() {{
             const input = document.getElementById('tweet-url-input');
@@ -1109,6 +1495,8 @@ def render_dashboard():
             div.dataset.likes = likes;
 
             div.innerHTML = `
+                <div class="parent-indicator" style="background:#10b981"></div>
+                <img class="avatar" src="https://unavatar.io/twitter/${{item.author_username}}" alt="" loading="lazy" onerror="this.src='https://abs.twimg.com/sticky/default_profile_images/default_profile_normal.png'">
                 <div class="item-content">
                     <div class="item-header">
                         <a href="${{tweetUrl}}" target="_blank" class="username">@${{item.author_username}}</a>
