@@ -22,6 +22,36 @@ PROJECT_DIR = Path(__file__).parent.resolve()
 DB_PATH = PROJECT_DIR / "data" / "feedback.db"
 
 
+def format_relative_time(iso_timestamp):
+    """Convert ISO timestamp to relative time like '2h ago', '3d ago'."""
+    if not iso_timestamp:
+        return ""
+    try:
+        # Parse ISO format (Twitter uses 2024-01-15T10:30:00.000Z)
+        ts = iso_timestamp.replace("Z", "+00:00")
+        dt = datetime.fromisoformat(ts.replace(".000", ""))
+        now = datetime.now(dt.tzinfo) if dt.tzinfo else datetime.now()
+        diff = now - dt
+
+        seconds = diff.total_seconds()
+        if seconds < 60:
+            return "now"
+        elif seconds < 3600:
+            mins = int(seconds / 60)
+            return f"{mins}m"
+        elif seconds < 86400:
+            hours = int(seconds / 3600)
+            return f"{hours}h"
+        elif seconds < 604800:
+            days = int(seconds / 86400)
+            return f"{days}d"
+        else:
+            weeks = int(seconds / 604800)
+            return f"{weeks}w"
+    except:
+        return ""
+
+
 def get_tracked_tweets():
     """Get list of parent tweet IDs being tracked."""
     if not DB_PATH.exists():
@@ -82,6 +112,7 @@ def render_dashboard():
         priority = item.get("priority", 0)
         # Use tweet ID as timestamp proxy (Twitter IDs are time-ordered)
         timestamp = item['id']
+        relative_time = format_relative_time(item.get('created_at', ''))
 
         items_html += f'''
         <div class="item" data-id="{item['id']}" data-username="{item['author_username']}"
@@ -90,6 +121,7 @@ def render_dashboard():
                 <div class="item-header">
                     <a href="{tweet_url}" target="_blank" class="username">@{item["author_username"]}</a>
                     {f'<span class="likes">♥ {likes}</span>' if likes > 0 else ''}
+                    {f'<span class="timestamp">{relative_time}</span>' if relative_time else ''}
                 </div>
                 <div class="item-text">{text_preview}</div>
                 <div class="item-note" id="note-{item['id']}"></div>
@@ -370,6 +402,12 @@ def render_dashboard():
             color: #ef4444;
         }}
 
+        .timestamp {{
+            font-size: 12px;
+            color: #94a3b8;
+            margin-left: auto;
+        }}
+
         .item-text {{
             color: #475569;
             font-size: 14px;
@@ -548,6 +586,29 @@ def render_dashboard():
             font-size: 18px;
             margin-bottom: 8px;
             color: #1e293b;
+        }}
+
+        /* New item animation */
+        .item.new-item {{
+            opacity: 0;
+            transform: translateY(-10px);
+            background: #ecfdf5;
+            transition: opacity 0.3s, transform 0.3s, background 2s;
+        }}
+
+        .item.new-item.visible {{
+            opacity: 1;
+            transform: translateY(0);
+        }}
+
+        .new-badge {{
+            background: #10b981;
+            color: #fff;
+            font-size: 10px;
+            font-weight: 600;
+            padding: 2px 6px;
+            border-radius: 4px;
+            text-transform: uppercase;
         }}
 
         /* Add tweet bar */
@@ -1015,39 +1076,127 @@ def render_dashboard():
             }}
         }}
 
-        async function refreshAll() {{
+        function formatRelativeTime(isoTimestamp) {{
+            if (!isoTimestamp) return '';
+            try {{
+                const dt = new Date(isoTimestamp);
+                const now = new Date();
+                const seconds = (now - dt) / 1000;
+                if (seconds < 60) return 'now';
+                if (seconds < 3600) return Math.floor(seconds / 60) + 'm';
+                if (seconds < 86400) return Math.floor(seconds / 3600) + 'h';
+                if (seconds < 604800) return Math.floor(seconds / 86400) + 'd';
+                return Math.floor(seconds / 604800) + 'w';
+            }} catch (e) {{ return ''; }}
+        }}
+
+        function createItemElement(item) {{
+            const text = item.text.replace(/</g, '&lt;').replace(/>/g, '&gt;');
+            const textPreview = text.length > 140 ? text.slice(0, 140) + '...' : text;
+            const textEscaped = text.replace(/'/g, "\\'").replace(/"/g, '\\"').replace(/\\n/g, ' ');
+            const metrics = typeof item.metrics === 'string' ? JSON.parse(item.metrics) : (item.metrics || {{}});
+            const likes = metrics.like_count || 0;
+            const tweetUrl = `https://x.com/${{item.author_username}}/status/${{item.id}}`;
+            const relativeTime = formatRelativeTime(item.created_at);
+
+            const div = document.createElement('div');
+            div.className = 'item new-item';
+            div.dataset.id = item.id;
+            div.dataset.username = item.author_username;
+            div.dataset.text = textEscaped;
+            div.dataset.priority = item.priority || 0;
+            div.dataset.timestamp = item.id;
+            div.dataset.likes = likes;
+
+            div.innerHTML = `
+                <div class="item-content">
+                    <div class="item-header">
+                        <a href="${{tweetUrl}}" target="_blank" class="username">@${{item.author_username}}</a>
+                        ${{likes > 0 ? `<span class="likes">♥ ${{likes}}</span>` : ''}}
+                        <span class="new-badge">NEW</span>
+                        ${{relativeTime ? `<span class="timestamp">${{relativeTime}}</span>` : ''}}
+                    </div>
+                    <div class="item-text">${{textPreview}}</div>
+                    <div class="item-note" id="note-${{item.id}}"></div>
+                </div>
+                <div class="item-actions">
+                    <button class="action-btn star" onclick="starItem('${{item.id}}')" title="Star">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"></polygon></svg>
+                    </button>
+                    <button class="action-btn archive" onclick="archiveItem('${{item.id}}')" title="Archive">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="21 8 21 21 3 21 3 8"></polyline><rect x="1" y="3" width="22" height="5"></rect><line x1="10" y1="12" x2="14" y2="12"></line></svg>
+                    </button>
+                    <button class="action-btn spam" onclick="spamItem('${{item.id}}')" title="Spam/Irrelevant">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>
+                    </button>
+                    <button class="action-btn note" onclick="toggleNote('${{item.id}}')" title="Add note">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path></svg>
+                    </button>
+                </div>
+                <div class="note-input" id="note-input-${{item.id}}">
+                    <input type="text" placeholder="Add a note..." onkeydown="saveNote('${{item.id}}', event)">
+                </div>
+            `;
+            return div;
+        }}
+
+        function refreshAll() {{
             const btn = document.getElementById('refresh-btn');
-            const svg = btn.querySelector('svg');
+            const container = document.getElementById('items-container');
 
             btn.disabled = true;
-            svg.classList.add('spinning');
-            btn.innerHTML = '<svg class="spinning" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"></polyline><polyline points="1 20 1 14 7 14"></polyline><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path></svg> Refreshing...';
-            showToast('Fetching latest replies...');
+            btn.innerHTML = '<svg class="spinning" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"></polyline><polyline points="1 20 1 14 7 14"></polyline><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path></svg> Checking...';
 
-            try {{
-                const response = await fetch('/api/refresh', {{
-                    method: 'POST',
-                    headers: {{ 'Content-Type': 'application/json' }}
-                }});
+            const eventSource = new EventSource('/api/refresh-stream');
+            let totalNew = 0;
 
-                const result = await response.json();
+            eventSource.onmessage = (event) => {{
+                const data = JSON.parse(event.data);
 
-                if (result.success) {{
-                    if (result.total_new > 0) {{
-                        showToast(`Found ${{result.total_new}} new items!`);
-                        setTimeout(() => location.reload(), 1000);
+                if (data.type === 'fetching') {{
+                    btn.innerHTML = `<svg class="spinning" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"></polyline><polyline points="1 20 1 14 7 14"></polyline><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path></svg> ${{data.index}}/${{data.total}}`;
+                }}
+                else if (data.type === 'new_items') {{
+                    // Insert new items at the top with animation
+                    const emptyState = document.getElementById('empty-state');
+                    data.items.forEach(item => {{
+                        const el = createItemElement(item);
+                        if (emptyState) {{
+                            container.insertBefore(el, emptyState);
+                        }} else {{
+                            container.insertBefore(el, container.firstChild);
+                        }}
+                        // Trigger animation
+                        requestAnimationFrame(() => el.classList.add('visible'));
+                    }});
+                    totalNew += data.count;
+                    showToast(`+${{data.count}} new`);
+                    updateCounts();
+                    applyFilters();
+                }}
+                else if (data.type === 'done') {{
+                    eventSource.close();
+                    btn.disabled = false;
+                    btn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"></polyline><polyline points="1 20 1 14 7 14"></polyline><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path></svg> Refresh';
+                    if (totalNew > 0) {{
+                        showToast(`Done! ${{totalNew}} new items`);
                     }} else {{
                         showToast('No new replies');
                     }}
-                }} else {{
-                    showToast('Error: ' + (result.error || 'Unknown error'));
                 }}
-            }} catch (e) {{
-                showToast('Error: ' + e.message);
-            }} finally {{
+                else if (data.type === 'error') {{
+                    showToast('Error: ' + data.message);
+                }}
+            }};
+
+            eventSource.onerror = () => {{
+                eventSource.close();
                 btn.disabled = false;
                 btn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"></polyline><polyline points="1 20 1 14 7 14"></polyline><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path></svg> Refresh';
-            }}
+                if (totalNew > 0) {{
+                    showToast(`Done! ${{totalNew}} new items`);
+                }}
+            }};
         }}
 
         // Allow Enter key to submit
@@ -1107,32 +1256,38 @@ def add_tweet(tweet_url):
         return {"success": False, "error": str(e)}
 
 
-def refresh_all_tweets():
-    """Incremental fetch for all tracked tweets."""
+def refresh_all_tweets_stream():
+    """Generator that yields SSE events as tweets are fetched."""
     tweet_ids = get_tracked_tweets()
     if not tweet_ids:
-        return {"success": False, "error": "No tweets being tracked"}
+        yield f"data: {json.dumps({'type': 'error', 'message': 'No tweets being tracked'})}\n\n"
+        return
 
-    results = []
     total_new = 0
 
-    for tweet_id in tweet_ids:
+    for i, tweet_id in enumerate(tweet_ids):
         tweet_url = f"https://x.com/i/status/{tweet_id}"
+
+        # Signal we're fetching this tweet
+        yield f"data: {json.dumps({'type': 'fetching', 'tweet_id': tweet_id, 'index': i+1, 'total': len(tweet_ids)})}\n\n"
+
         try:
-            # Get count before
+            # Get existing tweet IDs before fetch
             conn = sqlite3.connect(DB_PATH)
-            before = conn.execute("SELECT COUNT(*) FROM tweets WHERE parent_tweet_id = ?", [tweet_id]).fetchone()[0]
+            existing_ids = set(r[0] for r in conn.execute(
+                "SELECT id FROM tweets WHERE parent_tweet_id = ?", [tweet_id]
+            ).fetchall())
             conn.close()
 
             # Run incremental fetch
-            fetch_result = subprocess.run(
+            subprocess.run(
                 ["python3", str(PROJECT_DIR / "fetch.py"), tweet_url],
                 capture_output=True,
                 text=True,
                 timeout=120
             )
 
-            # Run analyze on new items
+            # Run analyze
             subprocess.run(
                 ["python3", str(PROJECT_DIR / "analyze.py"), tweet_url],
                 capture_output=True,
@@ -1140,21 +1295,40 @@ def refresh_all_tweets():
                 timeout=60
             )
 
-            # Get count after
+            # Get new tweets (ones that weren't there before)
             conn = sqlite3.connect(DB_PATH)
-            after = conn.execute("SELECT COUNT(*) FROM tweets WHERE parent_tweet_id = ?", [tweet_id]).fetchone()[0]
+            conn.row_factory = sqlite3.Row
+            all_tweets = conn.execute("""
+                SELECT t.id, t.author_username, t.text, t.tweet_type, t.metrics, t.created_at,
+                       COALESCE(a.priority, 0) as priority, t.parent_tweet_id
+                FROM tweets t
+                LEFT JOIN analysis a ON t.id = a.tweet_id
+                WHERE t.parent_tweet_id = ?
+            """, [tweet_id]).fetchall()
             conn.close()
 
-            new_count = after - before
-            total_new += new_count
-            results.append({"tweet_id": tweet_id, "new": new_count})
+            new_items = []
+            for row in all_tweets:
+                if row['id'] not in existing_ids:
+                    new_items.append({
+                        'id': row['id'],
+                        'author_username': row['author_username'],
+                        'text': row['text'],
+                        'metrics': row['metrics'],
+                        'priority': row['priority'],
+                        'created_at': row['created_at']
+                    })
+
+            if new_items:
+                total_new += len(new_items)
+                yield f"data: {json.dumps({'type': 'new_items', 'items': new_items, 'count': len(new_items)})}\n\n"
 
         except subprocess.TimeoutExpired:
-            results.append({"tweet_id": tweet_id, "error": "timeout"})
+            yield f"data: {json.dumps({'type': 'error', 'message': f'Timeout fetching {tweet_id}'})}\n\n"
         except Exception as e:
-            results.append({"tweet_id": tweet_id, "error": str(e)})
+            yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
 
-    return {"success": True, "total_new": total_new, "results": results}
+    yield f"data: {json.dumps({'type': 'done', 'total_new': total_new})}\n\n"
 
 
 class DashboardHandler(BaseHTTPRequestHandler):
@@ -1170,6 +1344,19 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.send_header("Content-Type", "application/json")
             self.end_headers()
             self.wfile.write(json.dumps(get_dashboard_data()).encode())
+        elif path == "/api/refresh-stream":
+            # Server-Sent Events for real-time refresh
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Connection", "keep-alive")
+            self.end_headers()
+            try:
+                for event in refresh_all_tweets_stream():
+                    self.wfile.write(event.encode())
+                    self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError):
+                pass  # Client disconnected
         else:
             self.send_response(404)
             self.end_headers()
